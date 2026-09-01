@@ -11,6 +11,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { generateDependencyReport } from '@discordjs/voice';
 import { config } from './config.js';
 import { getPlayer } from './player.js';
+import { materializeCookiesFromEnv } from './cookies.js';
+
+materializeCookiesFromEnv();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 

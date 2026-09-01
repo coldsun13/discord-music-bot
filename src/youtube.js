@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import play from 'play-dl';
 import { MAX_PLAYLIST_TRACKS } from './constants.js';
 import { resolveYtDlpPathAsync } from './bins.js';
+import { getCookiesFilePath } from './cookies.js';
 
 export { MAX_PLAYLIST_TRACKS };
 
@@ -34,11 +34,7 @@ export function isPlaylistUrl(query) {
 }
 
 function cookiesPath() {
-  const fromEnv = process.env.YTDLP_COOKIES || process.env.YOUTUBE_COOKIES;
-  if (fromEnv && existsSync(fromEnv)) return fromEnv;
-  const local = path.join(root, 'cookies.txt');
-  if (existsSync(local)) return local;
-  return null;
+  return getCookiesFilePath();
 }
 
 function ytDlpCommonArgs(playerClient = 'android,tv,web') {
