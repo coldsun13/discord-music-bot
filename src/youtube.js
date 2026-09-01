@@ -37,7 +37,7 @@ function cookiesPath() {
   return getCookiesFilePath();
 }
 
-function ytDlpCommonArgs(playerClient = 'android,tv,web') {
+function ytDlpCommonArgs(playerClient = 'web,mweb,android') {
   const args = [
     '--no-warnings',
     '--extractor-args',
@@ -46,6 +46,15 @@ function ytDlpCommonArgs(playerClient = 'android,tv,web') {
   const cookies = cookiesPath();
   if (cookies) {
     args.push('--cookies', cookies);
+  }
+  const proxy =
+    process.env.YTDLP_PROXY ||
+    process.env.HTTPS_PROXY ||
+    process.env.HTTP_PROXY ||
+    process.env.https_proxy ||
+    process.env.http_proxy;
+  if (proxy) {
+    args.push('--proxy', proxy);
   }
   return args;
 }
@@ -182,13 +191,10 @@ export async function resolveTrack(query) {
 }
 
 async function fetchTrackInfo(url) {
-  const attempts = [
-    'android,tv,web',
-    'android',
-    'tv',
-    'web',
-    'mweb',
-  ];
+  // Prefer web/mweb when cookies exist — android/tv often ignore cookies.
+  const attempts = cookiesPath()
+    ? ['web', 'web_safari', 'mweb', 'android']
+    : ['android,tv,web', 'android', 'tv', 'web', 'mweb'];
 
   let lastError = null;
   for (const client of attempts) {
