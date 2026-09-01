@@ -1,0 +1,8 @@
+services:
+  bot:
+    build: .
+    container_name: discord-music-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Voice needs outbound UDP; default Docker networking is fine on a VPS.
