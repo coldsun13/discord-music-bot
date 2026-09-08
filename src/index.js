@@ -4,6 +4,8 @@ import {
   Events,
   GatewayIntentBits,
   MessageFlags,
+  REST,
+  Routes,
 } from 'discord.js';
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -118,9 +120,26 @@ async function handleMusicButton(interaction) {
   }
 }
 
-client.once(Events.ClientReady, (c) => {
+/** Keep slash command definitions in sync on every boot. */
+async function syncCommands() {
+  const body = [...client.commands.values()].map((cmd) => cmd.data.toJSON());
+  const rest = new REST({ version: '10' }).setToken(config.token);
+  const route = config.guildId
+    ? Routes.applicationGuildCommands(config.clientId, config.guildId)
+    : Routes.applicationCommands(config.clientId);
+
+  await rest.put(route, { body });
+  console.log(`Synced ${body.length} slash commands.`);
+}
+
+client.once(Events.ClientReady, async (c) => {
   console.log(`Logged in as ${c.user.tag}`);
   console.log(generateDependencyReport());
+  try {
+    await syncCommands();
+  } catch (err) {
+    console.error('Failed to sync slash commands:', err.message);
+  }
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
