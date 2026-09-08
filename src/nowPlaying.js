@@ -109,7 +109,9 @@ export function buildNowPlayingEmbed(player) {
         .filter(Boolean)
         .join('\n'),
     )
-    .setFooter({ text: 'Music Bot' });
+    .setFooter({
+      text: track.source === 'soundcloud' ? 'Music Bot • SoundCloud' : 'Music Bot • YouTube',
+    });
 
   if (track.thumbnail) {
     embed.setThumbnail(track.thumbnail);

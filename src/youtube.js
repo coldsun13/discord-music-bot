@@ -13,8 +13,18 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const YT_URL_RE =
   /^(https?:\/\/)?(www\.|music\.)?(youtube\.com|youtu\.be)\//i;
 
+const SC_URL_RE = /^(https?:\/\/)?(www\.|m\.)?(soundcloud\.com|snd\.sc)\//i;
+
+/** YouTube answers with this when the host IP is flagged. */
+const BLOCKED_RE =
+  /not a bot|sign in to confirm|confirm you.{0,3}re not|HTTP Error 403|Requested format is not available|Video unavailable|player response/i;
+
 export function isYouTubeUrl(query) {
   return YT_URL_RE.test(query.trim());
+}
+
+export function isSoundCloudUrl(query) {
+  return SC_URL_RE.test(query.trim());
 }
 
 export function isPlaylistUrl(query) {
@@ -37,6 +47,17 @@ function cookiesPath() {
   return getCookiesFilePath();
 }
 
+function proxyUrl() {
+  return (
+    process.env.YTDLP_PROXY ||
+    process.env.HTTPS_PROXY ||
+    process.env.HTTP_PROXY ||
+    process.env.https_proxy ||
+    process.env.http_proxy ||
+    null
+  );
+}
+
 function ytDlpCommonArgs(playerClient = 'web,mweb,android') {
   const args = [
     '--no-warnings',
@@ -47,12 +68,7 @@ function ytDlpCommonArgs(playerClient = 'web,mweb,android') {
   if (cookies) {
     args.push('--cookies', cookies);
   }
-  const proxy =
-    process.env.YTDLP_PROXY ||
-    process.env.HTTPS_PROXY ||
-    process.env.HTTP_PROXY ||
-    process.env.https_proxy ||
-    process.env.http_proxy;
+  const proxy = proxyUrl();
   if (proxy) {
     args.push('--proxy', proxy);
   }
@@ -127,7 +143,7 @@ function pickAudioFormat(info) {
 function trackFromInfo(info, fallbackUrl) {
   const audio = pickAudioFormat(info);
   if (!audio?.streamUrl && !info.id && !fallbackUrl) {
-    throw new Error('Не удалось получить аудиопоток с YouTube.');
+    throw new Error('Не удалось получить аудиопоток.');
   }
 
   const watchUrl =
@@ -143,13 +159,16 @@ function trackFromInfo(info, fallbackUrl) {
     channel: info.uploader || info.channel || 'Unknown',
     streamUrl: audio?.streamUrl || null,
     httpHeaders: audio?.httpHeaders || {},
+    source: info.extractor_key === 'Soundcloud' || info.extractor === 'soundcloud'
+      ? 'soundcloud'
+      : 'youtube',
   };
 }
 
 function entryToQueueTrack(entry) {
   if (!entry || entry.ie_key === 'YoutubeTab') return null;
 
-  const id = entry.id || entry.url;
+  const id = entry.id != null ? String(entry.id) : entry.url;
   if (!id || typeof id !== 'string') return null;
 
   const watchUrl = id.startsWith('http')
@@ -173,21 +192,186 @@ function entryToQueueTrack(entry) {
   };
 }
 
-/**
- * Resolve a YouTube URL or search query into track metadata + stream URL.
- */
-export async function resolveTrack(query) {
-  const input = query.trim();
+/** yt-dlp call without YouTube-specific extractor args. */
+async function fetchPlainInfo(target) {
+  const args = ['--no-warnings', '--no-playlist'];
+  const proxy = proxyUrl();
+  if (proxy) args.push('--proxy', proxy);
+  args.push('-j', '--', target);
 
-  if (!isYouTubeUrl(input)) {
-    const results = await play.search(input, { limit: 1 });
-    if (!results.length) {
-      throw new Error('Ничего не найдено на YouTube.');
-    }
-    return fetchTrackInfo(results[0].url);
+  const stdout = await runYtDlp(args);
+  const info = JSON.parse(stdout.trim().split('\n')[0]);
+  const track = trackFromInfo(info, null);
+  if (!track.streamUrl) {
+    throw new Error('Не удалось получить аудиопоток.');
+  }
+  return track;
+}
+
+/** Junk that YouTube titles carry but SoundCloud titles don't. */
+function cleanQuery(raw) {
+  return String(raw)
+    .replace(/\((?=[^)]*(?:official|video|audio|lyrics?|visualizer|hd|4k|remaster))[^)]*\)/gi, ' ')
+    .replace(/\[(?=[^\]]*(?:official|video|audio|lyrics?|visualizer|hd|4k|remaster))[^\]]*\]/gi, ' ')
+    .replace(/\b(?:official\s+(?:music\s+)?video|official\s+audio|lyric\s+video|visualizer|topic)\b/gi, ' ')
+    .replace(/[|•·–—_]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const VARIANT_RE =
+  /\b(remix|edit|cover|live|bootleg|mashup|nightcore|sped\s*up|slowed|reverb|8d|karaoke|instrumental|acapella|snippet|preview|teaser)\b/i;
+
+function tokens(str) {
+  return new Set(
+    str
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length > 1),
+  );
+}
+
+function scoreCandidate(entry, wanted, expectedDuration) {
+  const duration = Number(entry.duration) || 0;
+  const haystack = `${entry.title || ''} ${entry.uploader || ''}`;
+  const hay = tokens(haystack);
+
+  let score = 0;
+  for (const t of wanted) if (hay.has(t)) score += 10;
+
+  // 30-second entries are almost always Go+ previews, not real tracks.
+  const wantsShort = expectedDuration > 0 && expectedDuration <= 45;
+  if (!wantsShort && duration > 0 && duration <= 35) score -= 60;
+  if (expectedDuration > 0 && duration > 0) {
+    const diff = Math.abs(duration - expectedDuration);
+    if (diff <= 5) score += 35;
+    else if (diff <= 15) score += 20;
+    else if (diff > 60) score -= 15;
+  }
+  if (VARIANT_RE.test(entry.title || '') && !VARIANT_RE.test(wantedRaw(wanted))) {
+    score -= 12;
+  }
+  return score;
+}
+
+function wantedRaw(wanted) {
+  return [...wanted].join(' ');
+}
+
+/**
+ * Search SoundCloud and stream the best match. Uses a cheap flat search to
+ * rank candidates (skipping Go+ 30-second previews), then extracts the winner.
+ */
+export async function searchSoundCloud(query, { expectedDuration = 0, limit = 10 } = {}) {
+  const cleaned = cleanQuery(query);
+  const args = ['--no-warnings', '--flat-playlist', '-J'];
+  const proxy = proxyUrl();
+  if (proxy) args.push('--proxy', proxy);
+  args.push(`scsearch${limit}:${cleaned}`);
+
+  let entries = [];
+  try {
+    const parsed = JSON.parse(await runYtDlp(args));
+    entries = (Array.isArray(parsed.entries) ? parsed.entries : []).filter(
+      (e) => e && (e.url || e.id),
+    );
+  } catch (err) {
+    console.warn(`[soundcloud] search failed: ${err.message}`);
   }
 
-  return fetchTrackInfo(input);
+  if (!entries.length) {
+    throw new Error(`На SoundCloud ничего не нашлось по запросу «${cleaned}».`);
+  }
+
+  const wanted = tokens(cleaned);
+  const ranked = entries
+    .map((e) => ({ entry: e, score: scoreCandidate(e, wanted, expectedDuration) }))
+    .sort((a, b) => b.score - a.score);
+
+  let lastError = null;
+  for (const { entry } of ranked.slice(0, 3)) {
+    const target = entry.webpage_url || entry.url;
+    if (!target) continue;
+    try {
+      return await fetchPlainInfo(target);
+    } catch (err) {
+      lastError = err;
+      console.warn(`[soundcloud] ${target} failed: ${err.message}`);
+    }
+  }
+
+  throw lastError || new Error('Не удалось получить аудиопоток с SoundCloud.');
+}
+
+/** Title lookup that keeps working when YouTube blocks the host IP. */
+async function fetchYouTubeTitle(url) {
+  const res = await fetch(
+    `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
+    { headers: { 'User-Agent': 'Mozilla/5.0' } },
+  );
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (!data?.title) return null;
+  return data.author_name ? `${data.author_name} - ${data.title}` : data.title;
+}
+
+/**
+ * Resolve a URL or search query into track metadata + stream URL.
+ * Falls back to SoundCloud when YouTube blocks the host.
+ */
+export async function resolveTrack(
+  query,
+  { fallbackQuery = null, fallbackDuration = 0, source = 'auto' } = {},
+) {
+  const input = query.trim();
+
+  if (isSoundCloudUrl(input)) {
+    return fetchPlainInfo(input);
+  }
+
+  const scFallback = async () => {
+    const scQuery =
+      fallbackQuery || (isYouTubeUrl(input) ? await fetchYouTubeTitle(input).catch(() => null) : input);
+    if (!scQuery) return null;
+    console.warn(`[soundcloud] fallback search: "${scQuery}"`);
+    return searchSoundCloud(scQuery, { expectedDuration: fallbackDuration });
+  };
+
+  if (source === 'soundcloud') {
+    const track = await scFallback();
+    if (!track) throw new Error('Не удалось определить название трека для поиска.');
+    return track;
+  }
+
+  if (!isYouTubeUrl(input)) {
+    let ytUrl = null;
+    try {
+      const results = await play.search(input, { limit: 1 });
+      ytUrl = results[0]?.url || null;
+    } catch (err) {
+      console.warn(`[youtube] search failed: ${err.message}`);
+    }
+
+    if (ytUrl) {
+      try {
+        return await fetchTrackInfo(ytUrl);
+      } catch (err) {
+        console.warn(`[youtube] blocked, trying SoundCloud: ${err.message}`);
+      }
+    }
+    return searchSoundCloud(input);
+  }
+
+  try {
+    return await fetchTrackInfo(input);
+  } catch (err) {
+    if (source === 'youtube' || !BLOCKED_RE.test(err.message)) throw err;
+
+    const track = await scFallback();
+    if (!track) throw err;
+    return track;
+  }
 }
 
 async function fetchTrackInfo(url) {
@@ -223,8 +407,12 @@ async function fetchTrackInfo(url) {
 }
 
 export async function fetchPlaylist(url, { limit = MAX_PLAYLIST_TRACKS } = {}) {
+  const baseArgs = isSoundCloudUrl(url)
+    ? ['--no-warnings', ...(proxyUrl() ? ['--proxy', proxyUrl()] : [])]
+    : ytDlpCommonArgs();
+
   const stdout = await runYtDlp([
-    ...ytDlpCommonArgs(),
+    ...baseArgs,
     '--yes-playlist',
     '--flat-playlist',
     '-J',
@@ -243,7 +431,7 @@ export async function fetchPlaylist(url, { limit = MAX_PLAYLIST_TRACKS } = {}) {
   }
 
   return {
-    title: info.title || info.playlist_title || 'YouTube Playlist',
+    title: info.title || info.playlist_title || 'Playlist',
     url: info.webpage_url || info.original_url || url,
     thumbnail: info.thumbnails?.at(-1)?.url || info.thumbnail || tracks[0]?.thumbnail || null,
     channel: info.uploader || info.channel || 'Unknown',
@@ -253,17 +441,18 @@ export async function fetchPlaylist(url, { limit = MAX_PLAYLIST_TRACKS } = {}) {
 }
 
 /**
- * Resolve search / YouTube into a unified result.
+ * Resolve search / YouTube / SoundCloud into a unified result.
  */
-export async function resolveInput(query, { asPlaylist = false } = {}) {
+export async function resolveInput(query, { asPlaylist = false, source = 'auto' } = {}) {
   const input = query.trim();
 
-  if (isYouTubeUrl(input) && (isPlaylistUrl(input) || asPlaylist)) {
+  const isScSet = isSoundCloudUrl(input) && /\/sets\//.test(input);
+  if (isScSet || (isYouTubeUrl(input) && (isPlaylistUrl(input) || asPlaylist))) {
     const playlist = await fetchPlaylist(input);
     return { type: 'playlist', playlist };
   }
 
-  const track = await resolveTrack(input);
+  const track = await resolveTrack(input, { source });
   return { type: 'track', track };
 }
 

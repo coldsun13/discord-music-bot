@@ -199,7 +199,10 @@ export class GuildMusicPlayer {
 
     let track = next;
     try {
-      const fresh = await resolveTrack(next.url);
+      const fresh = await resolveTrack(next.url, {
+        fallbackQuery: next.title,
+        fallbackDuration: next.duration,
+      });
       track = { ...next, ...fresh, requestedBy: next.requestedBy };
     } catch (err) {
       console.error(`[${this.guildId}] refresh failed:`, err.message);

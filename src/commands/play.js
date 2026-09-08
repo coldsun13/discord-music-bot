@@ -13,11 +13,11 @@ import { buildNowPlayingPayload } from '../nowPlaying.js';
 
 export const data = new SlashCommandBuilder()
   .setName('play')
-  .setDescription('Воспроизвести трек или плейлист с YouTube')
+  .setDescription('Воспроизвести трек или плейлист (YouTube / SoundCloud)')
   .addStringOption((option) =>
     option
       .setName('query')
-      .setDescription('Ссылка YouTube / плейлист / поисковый запрос')
+      .setDescription('Ссылка YouTube или SoundCloud / плейлист / поисковый запрос')
       .setRequired(true),
   )
   .addBooleanOption((option) =>
@@ -25,6 +25,16 @@ export const data = new SlashCommandBuilder()
       .setName('playlist')
       .setDescription(
         'Если в ссылке на видео YouTube есть list= — добавить весь плейлист',
+      )
+      .setRequired(false),
+  )
+  .addStringOption((option) =>
+    option
+      .setName('source')
+      .setDescription('Откуда брать звук')
+      .addChoices(
+        { name: 'auto (YouTube, при блокировке — SoundCloud)', value: 'auto' },
+        { name: 'soundcloud', value: 'soundcloud' },
       )
       .setRequired(false),
   );
@@ -65,10 +75,11 @@ export async function execute(interaction) {
 
   const query = interaction.options.getString('query', true);
   const asPlaylist = interaction.options.getBoolean('playlist') ?? false;
+  const source = interaction.options.getString('source') ?? 'auto';
   await interaction.deferReply();
 
   try {
-    const result = await resolveInput(query, { asPlaylist });
+    const result = await resolveInput(query, { asPlaylist, source });
     const player = getPlayer(interaction.guildId);
     player.textChannel = interaction.channel;
     await player.connect(voiceChannel);
