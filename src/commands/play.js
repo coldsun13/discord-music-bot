@@ -4,11 +4,8 @@ import {
   MessageFlags,
 } from 'discord.js';
 import { getPlayer } from '../player.js';
-import {
-  resolveInput,
-  formatDuration,
-  MAX_PLAYLIST_TRACKS,
-} from '../youtube.js';
+import { resolveInput } from '../resolve.js';
+import { formatDuration, MAX_PLAYLIST_TRACKS } from '../youtube.js';
 import { buildNowPlayingPayload } from '../nowPlaying.js';
 
 export const data = new SlashCommandBuilder()

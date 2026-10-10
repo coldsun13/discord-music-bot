@@ -9,18 +9,18 @@ export async function execute(interaction) {
     .setColor(0x5865f2)
     .setTitle('🎵 Музыкальный бот — руководство')
     .setDescription(
-      'Зайди в голосовой канал и используй команды ниже.\nЗвук берётся с **YouTube**, а если YouTube блокирует сервер — автоматически с **SoundCloud**.',
+      'Зайди в голосовой канал и используй команды ниже.\nЗвук идёт с **YouTube**, а также поддерживаются Spotify, SoundCloud, Apple Music и Яндекс.Музыка.',
     )
     .addFields(
       {
         name: '/play query: …',
         value: [
           'Включить трек или добавить в очередь:',
-          '• текст — поиск по названию',
-          '• ссылка на видео YouTube или трек SoundCloud',
-          '• ссылка на плейлист YouTube или сет SoundCloud (до 50 треков)',
+          '• текст — поиск по названию на YouTube',
+          '• ссылка на видео YouTube, трек Spotify, SoundCloud, Apple Music',
+          '• ссылка на плейлист или альбом (до 50 треков)',
           '• `playlist: True` — если в ссылке видео есть `list=`, взять весь плейлист',
-          '• `source: soundcloud` — искать сразу на SoundCloud, минуя YouTube',
+          '• `source: soundcloud` — искать на SoundCloud вместо YouTube',
         ].join('\n'),
       },
       {

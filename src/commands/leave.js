@@ -15,7 +15,7 @@ export async function execute(interaction) {
   }
 
   const player = getPlayer(interaction.guildId);
-  if (!player.connection) {
+  if (!player.voiceChannelId) {
     await interaction.reply({
       content: 'Я не в голосовом канале.',
       flags: MessageFlags.Ephemeral,

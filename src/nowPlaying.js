@@ -6,6 +6,25 @@ import {
 } from 'discord.js';
 import { formatDuration } from './youtube.js';
 
+const SOURCE_LABELS = {
+  youtube: 'YouTube',
+  ytmusic: 'YouTube Music',
+  soundcloud: 'SoundCloud',
+  spotify: 'Spotify',
+  applemusic: 'Apple Music',
+  deezer: 'Deezer',
+  yandexmusic: 'Яндекс.Музыка',
+  bandcamp: 'Bandcamp',
+  twitch: 'Twitch',
+  vimeo: 'Vimeo',
+  http: 'Прямая ссылка',
+};
+
+function sourceLabel(source) {
+  if (!source) return 'YouTube';
+  return SOURCE_LABELS[source] || source;
+}
+
 export function buildProgressBar(currentSec, totalSec, size = 14) {
   const total = Math.max(0, Number(totalSec) || 0);
   const current = Math.max(0, Math.min(total || currentSec, Number(currentSec) || 0));
@@ -109,9 +128,7 @@ export function buildNowPlayingEmbed(player) {
         .filter(Boolean)
         .join('\n'),
     )
-    .setFooter({
-      text: track.source === 'soundcloud' ? 'Music Bot • SoundCloud' : 'Music Bot • YouTube',
-    });
+    .setFooter({ text: `Music Bot • ${sourceLabel(track.source)}` });
 
   if (track.thumbnail) {
     embed.setThumbnail(track.thumbnail);

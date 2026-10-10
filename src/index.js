@@ -14,6 +14,7 @@ import { generateDependencyReport } from '@discordjs/voice';
 import { config } from './config.js';
 import { getPlayer } from './player.js';
 import { materializeCookiesFromEnv } from './cookies.js';
+import { initLavalink } from './lavalink.js';
 
 materializeCookiesFromEnv();
 
@@ -39,7 +40,7 @@ async function loadCommands() {
 
 function memberInBotVoice(interaction, player) {
   const memberChannel = interaction.member?.voice?.channelId;
-  const botChannel = player.connection?.joinConfig?.channelId;
+  const botChannel = player.voiceChannelId;
   return Boolean(memberChannel && botChannel && memberChannel === botChannel);
 }
 
@@ -170,4 +171,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 await loadCommands();
+// Must be set up before login: the connector hooks into client events.
+initLavalink(client);
 await client.login(config.token);

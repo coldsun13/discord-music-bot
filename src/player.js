@@ -1,93 +1,9 @@
-import {
-  AudioPlayerStatus,
-  StreamType,
-  VoiceConnectionStatus,
-  createAudioPlayer,
-  createAudioResource,
-  entersState,
-  joinVoiceChannel,
-} from '@discordjs/voice';
-import { spawn } from 'node:child_process';
 import { resolveTrack } from './youtube.js';
-import {
-  buildNowPlayingPayload,
-  fetchLyrics,
-} from './nowPlaying.js';
-import { resolveFfmpegPathAsync } from './bins.js';
-
-async function createTrackResource(track) {
-  const ffmpegBin = await resolveFfmpegPathAsync();
-  const args = [
-    '-reconnect',
-    '1',
-    '-reconnect_streamed',
-    '1',
-    '-reconnect_delay_max',
-    '5',
-  ];
-
-  const headers = track.httpHeaders || {};
-  if (Object.keys(headers).length > 0) {
-    const headerLines =
-      Object.entries(headers)
-        .map(([key, value]) => `${key}: ${value}`)
-        .join('\r\n') + '\r\n';
-    args.push('-headers', headerLines);
-  }
-
-  args.push(
-    '-i',
-    track.streamUrl,
-    '-vn',
-    '-analyzeduration',
-    '0',
-    '-loglevel',
-    'error',
-    '-c:a',
-    'libopus',
-    '-b:a',
-    '128k',
-    '-vbr',
-    'on',
-    '-compression_level',
-    '10',
-    '-application',
-    'audio',
-    '-frame_duration',
-    '20',
-    '-ar',
-    '48000',
-    '-ac',
-    '2',
-    '-f',
-    'ogg',
-    'pipe:1',
-  );
-
-  const ffmpeg = spawn(ffmpegBin, args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
-  ffmpeg.stderr.on('data', (chunk) => {
-    const msg = chunk.toString().trim();
-    if (msg) console.error(`[ffmpeg] ${msg}`);
-  });
-
-  ffmpeg.on('error', (err) => {
-    console.error(`[ffmpeg] failed to start (${ffmpegBin}):`, err.message);
-  });
-
-  const resource = createAudioResource(ffmpeg.stdout, {
-    inputType: StreamType.OggOpus,
-    metadata: track,
-  });
-
-  resource.playStream.on('close', () => {
-    if (!ffmpeg.killed) ffmpeg.kill('SIGKILL');
-  });
-
-  return resource;
-}
+import { resolveEncodedTrack } from './resolve.js';
+import { isLavalinkReady } from './lavalink.js';
+import { LavalinkEngine } from './engines/lavalink.js';
+import { LocalEngine } from './engines/local.js';
+import { buildNowPlayingPayload, fetchLyrics } from './nowPlaying.js';
 
 export class GuildMusicPlayer {
   constructor(guildId) {
@@ -95,17 +11,29 @@ export class GuildMusicPlayer {
     this.queue = [];
     this.current = null;
     this.textChannel = null;
-    this.connection = null;
-    this.player = createAudioPlayer();
+    this.voiceChannelId = null;
+    this.engine = null;
     this.idleTimer = null;
     this.panelMessage = null;
     this.progressTimer = null;
-    this.trackStartedAt = 0;
-    this.pausedAccumulatedMs = 0;
-    this.pauseStartedAt = null;
     this.stopping = false;
+  }
 
-    this.player.on(AudioPlayerStatus.Idle, () => {
+  get engineLabel() {
+    return this.engine ? this.engine.constructor.label : null;
+  }
+
+  async connect(voiceChannel) {
+    if (this.engine) {
+      this.voiceChannelId = voiceChannel.id;
+      await this.engine.connect(voiceChannel);
+      return;
+    }
+
+    const Engine = isLavalinkReady() ? LavalinkEngine : LocalEngine;
+    const engine = new Engine(this.guildId);
+
+    engine.onTrackEnd = () => {
       if (this.stopping) {
         this.stopping = false;
         return;
@@ -114,56 +42,28 @@ export class GuildMusicPlayer {
       this.stopProgressUpdates();
       this.playNext().catch((err) => {
         console.error(`[${this.guildId}] playNext error:`, err);
-        this.textChannel
-          ?.send(`Ошибка воспроизведения: ${err.message}`)
-          .catch(() => {});
+        this.textChannel?.send(`Ошибка воспроизведения: ${err.message}`).catch(() => {});
       });
-    });
+    };
 
-    this.player.on('error', (err) => {
-      console.error(`[${this.guildId}] player error:`, err);
-      this.textChannel
-        ?.send(`Ошибка плеера: ${err.message}`)
-        .catch(() => {});
-    });
-  }
-
-  async connect(voiceChannel) {
-    if (
-      this.connection &&
-      this.connection.state.status !== VoiceConnectionStatus.Destroyed
-    ) {
-      return this.connection;
-    }
-
-    this.connection = joinVoiceChannel({
-      channelId: voiceChannel.id,
-      guildId: voiceChannel.guild.id,
-      adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-      selfDeaf: true,
-    });
-
-    this.connection.subscribe(this.player);
+    engine.onError = (err, { fatal = false } = {}) => {
+      console.error(`[${this.guildId}] ${Engine.label} engine error:`, err.message);
+      if (fatal) {
+        this.destroy();
+        return;
+      }
+      this.textChannel?.send(`Ошибка плеера: ${err.message}`).catch(() => {});
+    };
 
     try {
-      await entersState(this.connection, VoiceConnectionStatus.Ready, 20_000);
-    } catch {
-      this.destroy();
-      throw new Error('Не удалось подключиться к голосовому каналу.');
+      await engine.connect(voiceChannel);
+    } catch (err) {
+      engine.destroy();
+      throw err;
     }
 
-    this.connection.on(VoiceConnectionStatus.Disconnected, async () => {
-      try {
-        await Promise.race([
-          entersState(this.connection, VoiceConnectionStatus.Signalling, 5_000),
-          entersState(this.connection, VoiceConnectionStatus.Connecting, 5_000),
-        ]);
-      } catch {
-        this.destroy();
-      }
-    });
-
-    return this.connection;
+    this.engine = engine;
+    this.voiceChannelId = voiceChannel.id;
   }
 
   enqueue(track) {
@@ -175,16 +75,27 @@ export class GuildMusicPlayer {
   }
 
   getPlaybackPosition() {
-    if (!this.current || !this.trackStartedAt) return 0;
-    let elapsed = Date.now() - this.trackStartedAt - this.pausedAccumulatedMs;
-    if (this.pauseStartedAt) {
-      elapsed -= Date.now() - this.pauseStartedAt;
+    if (!this.current || !this.engine) return 0;
+    const sec = this.engine.positionMs / 1000;
+    if (this.current.duration) return Math.min(sec, this.current.duration);
+    return Math.max(0, sec);
+  }
+
+  /** Give the current engine what it needs to actually stream this track. */
+  async prepareTrack(track) {
+    if (this.engine.constructor.requiresFreshStream) {
+      const fresh = await resolveTrack(track.url, {
+        fallbackQuery: track.title,
+        fallbackDuration: track.duration,
+      });
+      return { ...track, ...fresh, requestedBy: track.requestedBy };
     }
-    const sec = Math.max(0, elapsed / 1000);
-    if (this.current.duration) {
-      return Math.min(sec, this.current.duration);
-    }
-    return sec;
+
+    if (track.encoded) return track;
+
+    // Playlist entries are enumerated locally, so ask a node for this one now.
+    const resolved = await resolveEncodedTrack(track);
+    return { ...track, ...resolved, requestedBy: track.requestedBy };
   }
 
   async playNext({ updatePanel = true } = {}) {
@@ -197,15 +108,13 @@ export class GuildMusicPlayer {
       return;
     }
 
-    let track = next;
+    if (!this.engine) throw new Error('Плеер не подключён к голосовому каналу.');
+
+    let track;
     try {
-      const fresh = await resolveTrack(next.url, {
-        fallbackQuery: next.title,
-        fallbackDuration: next.duration,
-      });
-      track = { ...next, ...fresh, requestedBy: next.requestedBy };
+      track = await this.prepareTrack(next);
     } catch (err) {
-      console.error(`[${this.guildId}] refresh failed:`, err.message);
+      console.error(`[${this.guildId}] prepare failed:`, err.message);
       this.textChannel
         ?.send(`Не удалось воспроизвести **${next.title}**: ${err.message}`)
         .catch(() => {});
@@ -213,12 +122,7 @@ export class GuildMusicPlayer {
     }
 
     this.current = track;
-    this.trackStartedAt = Date.now();
-    this.pausedAccumulatedMs = 0;
-    this.pauseStartedAt = null;
-
-    const resource = await createTrackResource(track);
-    this.player.play(resource);
+    await this.engine.play(track);
 
     if (updatePanel) {
       await this.refreshNowPlaying();
@@ -282,26 +186,28 @@ export class GuildMusicPlayer {
 
   skip() {
     if (!this.current && this.queue.length === 0) return false;
-    this.player.stop(true);
+
+    // Nothing playing means no track-end event will arrive to advance us.
+    if (!this.current) {
+      this.playNext().catch((err) => {
+        console.error(`[${this.guildId}] skip error:`, err);
+      });
+      return true;
+    }
+
+    this.engine?.stopCurrent();
     return true;
   }
 
   pause() {
-    const ok = this.player.pause(true);
-    if (ok) {
-      this.pauseStartedAt = Date.now();
-      this.refreshNowPlaying().catch(() => {});
-    }
+    const ok = Boolean(this.engine?.setPaused(true));
+    if (ok) this.refreshNowPlaying().catch(() => {});
     return ok;
   }
 
   resume() {
-    const ok = this.player.unpause();
-    if (ok && this.pauseStartedAt) {
-      this.pausedAccumulatedMs += Date.now() - this.pauseStartedAt;
-      this.pauseStartedAt = null;
-      this.refreshNowPlaying().catch(() => {});
-    }
+    const ok = Boolean(this.engine?.setPaused(false));
+    if (ok) this.refreshNowPlaying().catch(() => {});
     return ok;
   }
 
@@ -329,11 +235,12 @@ export class GuildMusicPlayer {
   }
 
   stop() {
-    this.stopping = true;
+    // Only swallow a track-end event if one is actually coming.
+    this.stopping = Boolean(this.current);
     this.queue = [];
     this.current = null;
     this.stopProgressUpdates();
-    this.player.stop(true);
+    this.engine?.stopCurrent();
     this.disablePanel().catch(() => {});
     this.scheduleIdleLeave();
   }
@@ -356,28 +263,17 @@ export class GuildMusicPlayer {
     this.queue = [];
     this.current = null;
     this.panelMessage = null;
-    try {
-      this.player.stop(true);
-    } catch {
-      // ignore
-    }
-    try {
-      this.connection?.destroy();
-    } catch {
-      // ignore
-    }
-    this.connection = null;
+    this.voiceChannelId = null;
+    this.engine?.destroy();
+    this.engine = null;
   }
 
   get isPlaying() {
-    return (
-      this.player.state.status === AudioPlayerStatus.Playing ||
-      this.player.state.status === AudioPlayerStatus.Buffering
-    );
+    return Boolean(this.engine?.isPlaying);
   }
 
   get isPaused() {
-    return this.player.state.status === AudioPlayerStatus.Paused;
+    return Boolean(this.engine?.isPaused);
   }
 }
 
